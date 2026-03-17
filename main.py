@@ -352,6 +352,7 @@ def main() -> None:
         port=PORT,
         url_path="telegram/webhook",
         webhook_url=webhook_url,
+        allowed_updates=Update.ALL_TYPES,
     )
 
 
