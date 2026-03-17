@@ -247,6 +247,13 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # =========================
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.effective_message
+
+    # 🔥 LOG PARA VER SI ENTRAN MENSAJES
+    logger.info(
+        f"UPDATE RECIBIDO: chat_id={update.effective_chat.id if update.effective_chat else 'None'} "
+        f"text={msg.text if msg and msg.text else 'NO_TEXT'}"
+    )
+
     if not msg or not msg.text:
         return
 
@@ -256,32 +263,40 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     user_id = str(update.effective_user.id) if update.effective_user else "unknown"
 
+    # rate limit básico
     if not check_rate_limit(user_id):
         return
 
     conv_id, dm_topic_id = conv_id_and_topic(update)
 
     logger.info(
-        f"Mensaje recibido - conv_id={conv_id} dm_topic_id={dm_topic_id} "
+        f"Procesando mensaje - conv_id={conv_id} dm_topic_id={dm_topic_id} "
         f"message_id={msg.message_id}"
     )
 
+    # guardar input usuario
     append_history(conv_id, "user", user_text)
 
+    # generar respuesta IA
     history = get_history(conv_id)
     raw_reply = generate_reply(history, user_text)
 
+    # fallback si IA falla o dice cosas raras
     if not validate_reply(raw_reply):
+        logger.warning("Respuesta inválida → fallback")
         raw_reply = fallback_from_user_text(user_text)
 
+    # humanizar un poco
     reply = add_human_style(raw_reply)
+
+    # dividir en 2 si es largo
     part1, part2 = split_message(reply)
 
     append_history(conv_id, "assistant", part1)
     if part2:
         append_history(conv_id, "assistant", part2)
 
-    # En channel direct messages chats no siempre acepta typing, así que lo ignoramos si falla
+    # typing (puede fallar en topics de canal → ignoramos)
     try:
         await context.bot.send_chat_action(
             chat_id=update.effective_chat.id,
@@ -294,7 +309,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     send_kwargs = {}
 
-    # IMPORTANTE para DM topics de canal
+    # 🔥 CLAVE: soporte correcto para DM topics
     if dm_topic_id is not None:
         send_kwargs["direct_messages_topic_id"] = dm_topic_id
     else:
@@ -302,12 +317,14 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             send_kwargs["reply_to_message_id"] = msg.message_id
 
     try:
+        # enviar primera parte
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=part1,
             **send_kwargs,
         )
 
+        # segunda parte si existe
         if part2:
             await asyncio.sleep(random.uniform(1.5, 3.5))
             await context.bot.send_message(
@@ -317,11 +334,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
 
     except BadRequest as e:
-        logger.error(f"Error enviando BadRequest: {e}")
-        await alert_owner(context, f"⚠️ Error enviando: {str(e)[:250]}")
+        logger.error(f"BadRequest enviando mensaje: {e}")
+        await alert_owner(context, f"⚠️ Error Telegram: {str(e)[:250]}")
+
     except Exception as e:
-        logger.error(f"Error enviando: {e}")
-        await alert_owner(context, f"⚠️ Error enviando: {str(e)[:250]}")
+        logger.error(f"Error enviando mensaje: {e}")
+        await alert_owner(context, f"⚠️ Error general: {str(e)[:250]}")
 
 
 async def error_handler(update: Optional[Update], context: ContextTypes.DEFAULT_TYPE) -> None:
