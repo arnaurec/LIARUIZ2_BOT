@@ -111,13 +111,16 @@ async def send_reply_with_fanvue(update: Update, context: ContextTypes.DEFAULT_T
     # Decidir si enviamos el botón (cada 5 mensajes o si se fuerza por intención o mención de fanvue)
     should_send_button = force_link or (data["msg_count"] > 0 and data["msg_count"] % 5 == 0)
     
+    # IMPORTANTE: Detectar si el mensaje original está en un Topic
+    thread_id = update.message.message_thread_id if update.message else None
+    
     if should_send_button:
         keyboard = [[InlineKeyboardButton("🔥 VENTE A MI SITIO PRIVADO 🔥", url=FANVUE_URL)]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        # Enviamos la respuesta de la IA con el botón adjunto (sin el link en el texto)
-        await update.message.reply_text(reply_text, reply_markup=reply_markup)
+        # Enviamos la respuesta con el thread_id correcto para Topics
+        await update.message.reply_text(reply_text, reply_markup=reply_markup, message_thread_id=thread_id)
     else:
-        await update.message.reply_text(reply_text)
+        await update.message.reply_text(reply_text, message_thread_id=thread_id)
 
 # =========================
 # COMANDOS Y MENSAJES
@@ -129,7 +132,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if update.message:
             user_id = str(update.effective_user.id)
             user_data[user_id] = {"history": deque(maxlen=15), "msg_count": 0}
-            await update.message.reply_text(random.choice(START_MESSAGES))
+            thread_id = update.message.message_thread_id
+            await update.message.reply_text(random.choice(START_MESSAGES), message_thread_id=thread_id)
     except Exception as e:
         logger.error(f"Error start: {e}")
 
@@ -182,13 +186,14 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
                 await asyncio.sleep(min(5, delay - (time.time() - start_typing)))
             
-            # Enviar respuesta con lógica de botón integrada (sin link en texto)
+            # Enviar respuesta con lógica de botón integrada y soporte para Topics
             await send_reply_with_fanvue(update, context, reply, force_link=is_sales_intent)
             
     except Exception as e:
         logger.error(f"Error OpenAI: {e}")
         if update.message:
-            await update.message.reply_text("ay perdon bb me he quedado un poco pillada pensando en ti... q me decias")
+            thread_id = update.message.message_thread_id
+            await update.message.reply_text("ay perdon bb me he quedado un poco pillada pensando en ti... q me decias", message_thread_id=thread_id)
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error(f"ERROR GLOBAL: {context.error}")
@@ -201,10 +206,13 @@ def main() -> None:
         return
     threading.Thread(target=run_flask, daemon=True).start()
     application = Application.builder().token(BOT_TOKEN).build()
+
     application.add_handler(CommandHandler("start", start_command))
+    # Filtro ampliado para grupos y topics
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     application.add_error_handler(error_handler)
-    logger.info("Lia 2.0 (Privacy & Variety) online...")
+    
+    logger.info("Lia 2.0 (Topics & Groups Support) online...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
