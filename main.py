@@ -27,10 +27,8 @@ logger = logging.getLogger("lia-bot")
 # =========================
 # VARIABLES DE ENTORNO
 # =========================
-# Nota: En Railway, asegúrate de que BOT_TOKEN sea el token de Telegram
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-# PUBLIC_URL debe ser https://liaruiz2bot-production.up.railway.app (sin barra final)
 PUBLIC_URL = os.getenv("PUBLIC_URL")
 PORT = int(os.getenv("PORT", "8080"))
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -38,9 +36,7 @@ OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID")
 
 if not BOT_TOKEN or not OPENAI_API_KEY or not PUBLIC_URL:
     logger.error(f"Faltan variables de entorno críticas. BOT_TOKEN: {bool(BOT_TOKEN)}, OPENAI_API_KEY: {bool(OPENAI_API_KEY)}, PUBLIC_URL: {bool(PUBLIC_URL)}")
-    # No lanzamos RuntimeError aquí para permitir que el proceso se mantenga vivo y ver logs si es necesario, 
-    # pero el bot no funcionará sin estas variables.
-    
+
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # =========================
@@ -92,7 +88,6 @@ def conv_id_and_topic(update: Update) -> Tuple[str, Optional[int]]:
         return "unknown", None
 
     dm_topic_id = None
-    # Intento de soporte para topics, aunque para bots estándar suele ser simple chat.id
     try:
         if hasattr(msg, "message_thread_id") and msg.message_thread_id:
             dm_topic_id = msg.message_thread_id
@@ -250,11 +245,6 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.effective_message
 
-    logger.info(
-        f"UPDATE RECIBIDO: chat_id={update.effective_chat.id if update.effective_chat else 'None'} "
-        f"text={msg.text if msg and msg.text else 'NO_TEXT'}"
-    )
-
     if not msg or not msg.text:
         return
 
@@ -318,14 +308,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # =========================
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error(f"ERROR GLOBAL: {context.error}", exc_info=True)
-    if OWNER_CHAT_ID and context.error:
-        try:
-            await context.bot.send_message(
-                chat_id=int(OWNER_CHAT_ID),
-                text=f"💥 Error global: {str(context.error)[:400]}",
-            )
-        except Exception:
-            pass
 
 # =========================
 # MAIN
@@ -335,14 +317,14 @@ def main() -> None:
         logger.error("BOT_TOKEN no configurado. Saliendo.")
         return
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    # Usar updater=None para evitar el error de __polling_cleanup_cb en algunas versiones/entornos
+    app = Application.builder().token(BOT_TOKEN).updater(None).build()
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("clear", clear_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(error_handler)
 
-    # Limpiar URL pública (eliminar barra final si existe)
     base_url = PUBLIC_URL.rstrip('/') if PUBLIC_URL else ""
     webhook_url = f"{base_url}/telegram/webhook"
     
