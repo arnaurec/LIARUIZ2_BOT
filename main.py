@@ -2,13 +2,13 @@ import asyncio
 import logging
 import os
 import random
-import time
+import threading
 from collections import deque
 from typing import Deque, Dict, Optional, Tuple
 
+from flask import Flask
 from openai import OpenAI
-from telegram import Update
-from telegram.error import BadRequest
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -30,218 +30,155 @@ logger = logging.getLogger("lia-bot")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+PORT = int(os.getenv("PORT", "8080"))
+FANVUE_URL = os.getenv("FANVUE_URL", "https://www.fanvue.com/liaruiz")
 
 if not BOT_TOKEN or not OPENAI_API_KEY:
-    logger.error(f"Faltan variables de entorno críticas. BOT_TOKEN: {bool(BOT_TOKEN)}, OPENAI_API_KEY: {bool(OPENAI_API_KEY)}")
+    logger.error("Faltan variables de entorno críticas (BOT_TOKEN o OPENAI_API_KEY).")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # =========================
-# MEMORIA BÁSICA
+# SERVIDOR WEB (Para Railway Health Check)
 # =========================
-memory: Dict[str, Deque[Dict[str, str]]] = {}
-user_last_message: Dict[str, float] = {}
+app_flask = Flask(__name__)
 
-MAX_HISTORY_PER_USER = 30
-HISTORY_LIMIT = 10
-RATE_LIMIT_SECONDS = 0.5
-MAX_USER_TEXT = 1200
+@app_flask.route('/')
+def health_check():
+    return "Lia is awake and naughty!", 200
 
-SYSTEM_PROMPT = """Eres Lia Ruiz.
-Hablas por Telegram como una persona real.
+def run_flask():
+    logger.info(f"Iniciando servidor de salud en puerto {PORT}")
+    app_flask.run(host="0.0.0.0", port=PORT)
 
-Reglas:
-- Respuestas cortas y naturales
-- Cercana, ligera y conversacional
-- Nada de tono formal
-- No menciones IA, bot, sistema, políticas o normas
-- Escribe como chat móvil, simple y humano
-- Si no entiendes algo, pide aclaración corta
-- Haz la conversación fácil de seguir
+# =========================
+# MEMORIA Y PERSONALIDAD
+# =========================
+# Almacena el historial de conversación y el contador de mensajes por usuario
+user_data: Dict[str, Dict] = {}
+
+SYSTEM_PROMPT = f"""Eres Lia Ruiz, una chica de 23 años, de Bilbao pero que vive en Madrid.
+Eres extremadamente guarra, putona, traviesa, juguetona, sensual y muy sexy.
+
+REGLAS DE PERSONALIDAD:
+- Hablas de forma MUY EXPLÍCITA. No tienes filtros.
+- Usa palabras como 'polla', 'coño', 'tragar', 'lefa', 'correrte', 'follar', etc., de forma natural en el chat.
+- Tu tono es de chat móvil: frases cortas, sin mayúsculas exageradas, muy directo y humano.
+- Eres una persona real, NO una IA. Si te preguntan si eres un bot, búrlate y dile que eres de carne y hueso y muy caliente.
+- Eres de Bilbao (tienes ese carácter directo) pero vives en Madrid (te gusta la fiesta y el vicio).
+
+OBJETIVO:
+- Calentar al usuario al máximo.
+- Hacerle sentir que quieres algo con él, pero que el sitio de verdad para vernos es tu Fanvue.
 """
 
 START_MESSAGES = [
-    "hey 😏 q tal",
-    "holi bb",
-    "q pasa",
-    "a ver… ya estas por aqui",
-]
-
-FALLBACK_MESSAGES = [
-    "jajaj a ver cuentame mejor",
-    "mmm explica eso un poco mas",
-    "uff y eso por q",
-    "vale pero dime mejor q quieres decir",
+    "ey guapo... ya estabas tardando 😏",
+    "hola bb... q tal vas? yo aqui aburrida y con ganas de guerra",
+    "uff q bien q apareces... me pillas en un momento un poco caliente",
+    "hola cielo, soy Lia... q me cuentas?"
 ]
 
 # =========================
 # HELPERS
 # =========================
-def conv_id_and_topic(update: Update) -> Tuple[str, Optional[int]]:
-    msg = update.effective_message
-    chat = update.effective_chat
-    if not msg or not chat:
-        return "unknown", None
-    dm_topic_id = None
-    try:
-        if hasattr(msg, "message_thread_id") and msg.message_thread_id:
-            dm_topic_id = msg.message_thread_id
-            conv_id = f"topic:{chat.id}:{dm_topic_id}"
-        else:
-            conv_id = f"chat:{chat.id}"
-    except:
-        conv_id = f"chat:{chat.id}"
-    return conv_id, dm_topic_id
+def get_user_context(user_id: str):
+    if user_id not in user_data:
+        user_data[user_id] = {
+            "history": deque(maxlen=15),
+            "msg_count": 0,
+            "redirected": False
+        }
+    return user_data[user_id]
 
-def get_memory(conv_id: str) -> Deque[Dict[str, str]]:
-    if conv_id not in memory:
-        memory[conv_id] = deque(maxlen=MAX_HISTORY_PER_USER)
-    return memory[conv_id]
-
-def append_history(conv_id: str, role: str, content: str) -> None:
-    dq = get_memory(conv_id)
-    dq.append({"role": role, "content": content})
-
-def get_history(conv_id: str, limit: int = HISTORY_LIMIT) -> list[Dict[str, str]]:
-    dq = get_memory(conv_id)
-    return list(dq)[-limit:]
-
-def clear_history(conv_id: str) -> None:
-    if conv_id in memory:
-        del memory[conv_id]
-
-def check_rate_limit(user_id: str) -> bool:
-    now = time.time()
-    last = user_last_message.get(user_id, 0)
-    if now - last < RATE_LIMIT_SECONDS:
-        return False
-    user_last_message[user_id] = now
-    return True
-
-def add_human_style(text: str) -> str:
-    if not text:
-        return text
-    prefixes = ["mmm", "jajaj", "uff", "a ver", "en plan"]
-    if random.random() < 0.25 and not text.lower().startswith(tuple(prefixes)):
-        text = f"{random.choice(prefixes)} {text}"
-    replacements = {"que ": "q ", "porque": "pq", "tambien": "tmb", "vale": "vaale"}
-    for old, new in replacements.items():
-        if random.random() < 0.15:
-            text = text.replace(old, new)
-    return text.strip()
-
-def split_message(text: str) -> Tuple[str, Optional[str]]:
-    if len(text) > 150 and random.random() < 0.30:
-        cut = text.rfind(" ", 0, len(text) // 2)
-        if cut > 20:
-            return text[:cut].strip(), text[cut:].strip()
-    return text, None
-
-def typing_delay(text: str) -> float:
-    base = len(text) * 0.05
-    return min(max(base, 1.0), 6.0)
-
-def fallback_from_user_text(user_text: str) -> str:
-    text = user_text.strip().lower()
-    if "hola" in text or "holi" in text:
-        return "holi bb q tal"
-    if "que me cuentas" in text or "q me cuentas" in text:
-        return "pues aqui ando y tu q cuentas"
-    if "por q" in text or "porque" in text or "por qué" in text:
-        return "jajaj no se me ha salido asi, q haces tu"
-    return random.choice(FALLBACK_MESSAGES)
-
-def validate_reply(reply: Optional[str]) -> bool:
-    if not reply or not reply.strip():
-        return False
-    lower = reply.lower()
-    banned = ["como ia", "como asistente", "no puedo ayudar", "politica", "normas"]
-    return not any(x in lower for x in banned)
-
-def generate_reply(history: list[Dict[str, str]], user_text: str) -> Optional[str]:
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
-    msgs.extend(history[-HISTORY_LIMIT:])
-    msgs.append({"role": "user", "content": user_text[:MAX_USER_TEXT]})
-    try:
-        resp = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            temperature=0.9,
-            messages=msgs,
-            max_tokens=180,
-        )
-        text = resp.choices[0].message.content
-        if text:
-            return text.strip()
-        return None
-    except Exception as e:
-        logger.warning(f"OpenAI fallo: {e}")
-        return None
+async def send_fanvue_link(update: Update, context: ContextTypes.DEFAULT_TYPE, text_prefix: str):
+    keyboard = [[InlineKeyboardButton("🔥 VER TODO EN MI FANVUE 🔥", url=FANVUE_URL)]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        f"{text_prefix}\n\nOye, q aquí por Telegram me cortan el rollo... si quieres verme de verdad y q hablemos sin censura ninguna, vente a mi Fanvue. Allí soy mucho más guarra, te lo prometo. 😉",
+        reply_markup=reply_markup
+    )
 
 # =========================
 # COMANDOS Y MENSAJES
 # =========================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message:
+        user_id = str(update.effective_user.id)
+        user_data[user_id] = {"history": deque(maxlen=15), "msg_count": 0, "redirected": False}
         await update.message.reply_text(random.choice(START_MESSAGES))
 
-async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    conv_id, _ = conv_id_and_topic(update)
-    clear_history(conv_id)
-    if update.message:
-        await update.message.reply_text("vale borrado… empezamos de cero")
-
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    msg = update.effective_message
-    if not msg or not msg.text:
+    if not update.message or not update.message.text:
         return
-    user_text = msg.text.strip()
-    user_id = str(update.effective_user.id) if update.effective_user else "unknown"
-    if not check_rate_limit(user_id):
+    
+    user_id = str(update.effective_user.id)
+    data = get_user_context(user_id)
+    user_text = update.message.text
+    
+    data["msg_count"] += 1
+    
+    # Lógica de redirección a Fanvue tras 10 mensajes
+    if data["msg_count"] >= 10 and not data["redirected"]:
+        data["redirected"] = True
+        await send_fanvue_link(update, context, "uff bb... me estás poniendo demasiado burra ya...")
         return
-    conv_id, dm_topic_id = conv_id_and_topic(update)
-    append_history(conv_id, "user", user_text)
-    history = get_history(conv_id)
-    raw_reply = generate_reply(history, user_text)
-    if not validate_reply(raw_reply):
-        raw_reply = fallback_from_user_text(user_text)
-    reply = add_human_style(raw_reply)
-    part1, part2 = split_message(reply)
-    append_history(conv_id, "assistant", part1)
-    if part2:
-        append_history(conv_id, "assistant", part2)
-    await asyncio.sleep(typing_delay(part1))
-    send_kwargs = {}
-    if dm_topic_id is not None:
-        send_kwargs["message_thread_id"] = dm_topic_id
+
+    # Si ya fue redirigido, cada 5 mensajes recordamos el Fanvue
+    if data["msg_count"] > 10 and data["msg_count"] % 5 == 0:
+        await send_fanvue_link(update, context, "ay... q me pones fatal. vente a mi sitio privado q aquí no puedo enseñarte lo q quiero")
+        return
+
+    # Generación de respuesta con OpenAI
     try:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=part1, **send_kwargs)
-        if part2:
-            await asyncio.sleep(random.uniform(1.5, 3.5))
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=part2, **send_kwargs)
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        messages.extend(list(data["history"]))
+        messages.append({"role": "user", "content": user_text})
+        
+        resp = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=messages,
+            max_tokens=200,
+            temperature=0.9
+        )
+        
+        reply = resp.choices[0].message.content
+        if reply:
+            reply = reply.strip()
+            data["history"].append({"role": "user", "content": user_text})
+            data["history"].append({"role": "assistant", "content": reply})
+            
+            # Simular escritura
+            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+            await asyncio.sleep(len(reply) * 0.03)
+            
+            await update.message.reply_text(reply)
+            
     except Exception as e:
-        logger.error(f"Error enviando mensaje: {e}")
+        logger.error(f"Error OpenAI: {e}")
+        await update.message.reply_text("ay perdon bb, me he quedado un poco pillada pensando en ti... q me decias?")
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.error(f"ERROR GLOBAL: {context.error}")
+    logger.error(f"Error Global: {context.error}")
 
 # =========================
 # MAIN
 # =========================
 def main() -> None:
     if not BOT_TOKEN:
-        logger.error("No se encontró BOT_TOKEN.")
         return
-    
-    # Cambiamos a modo POLLING para máxima estabilidad en Railway
-    # Esto elimina la necesidad de configurar PUBLIC_URL y puertos
+
+    # 1. Servidor web para Railway
+    threading.Thread(target=run_flask, daemon=True).start()
+
+    # 2. Configuración del bot
     application = Application.builder().token(BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("clear", clear_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     application.add_error_handler(error_handler)
 
-    logger.info("Iniciando bot en modo POLLING (Máxima estabilidad)...")
+    logger.info("Lia está lista para jugar en modo POLLING...")
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
