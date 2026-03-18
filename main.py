@@ -17,6 +17,7 @@ from telegram.ext import (
     filters,
 )
 
+# Configuración de logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -26,16 +27,20 @@ logger = logging.getLogger("lia-bot")
 # =========================
 # VARIABLES DE ENTORNO
 # =========================
+# Nota: En Railway, asegúrate de que BOT_TOKEN sea el token de Telegram
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# PUBLIC_URL debe ser https://liaruiz2bot-production.up.railway.app (sin barra final)
 PUBLIC_URL = os.getenv("PUBLIC_URL")
 PORT = int(os.getenv("PORT", "8080"))
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID")
 
 if not BOT_TOKEN or not OPENAI_API_KEY or not PUBLIC_URL:
-    raise RuntimeError("Faltan env vars: BOT_TOKEN, OPENAI_API_KEY, PUBLIC_URL")
-
+    logger.error(f"Faltan variables de entorno críticas. BOT_TOKEN: {bool(BOT_TOKEN)}, OPENAI_API_KEY: {bool(OPENAI_API_KEY)}, PUBLIC_URL: {bool(PUBLIC_URL)}")
+    # No lanzamos RuntimeError aquí para permitir que el proceso se mantenga vivo y ver logs si es necesario, 
+    # pero el bot no funcionará sin estas variables.
+    
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # =========================
@@ -87,12 +92,14 @@ def conv_id_and_topic(update: Update) -> Tuple[str, Optional[int]]:
         return "unknown", None
 
     dm_topic_id = None
-
-    # soporte correcto para channel direct messages
-    if getattr(msg, "direct_messages_topic", None):
-        dm_topic_id = msg.direct_messages_topic.topic_id
-        conv_id = f"dm:{chat.id}:{dm_topic_id}"
-    else:
+    # Intento de soporte para topics, aunque para bots estándar suele ser simple chat.id
+    try:
+        if hasattr(msg, "message_thread_id") and msg.message_thread_id:
+            dm_topic_id = msg.message_thread_id
+            conv_id = f"topic:{chat.id}:{dm_topic_id}"
+        else:
+            conv_id = f"chat:{chat.id}"
+    except:
         conv_id = f"chat:{chat.id}"
 
     return conv_id, dm_topic_id
@@ -280,13 +287,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await asyncio.sleep(typing_delay(part1))
 
     send_kwargs = {}
-
-    # CLAVE para DM topics de canal
     if dm_topic_id is not None:
-        send_kwargs["direct_messages_topic_id"] = dm_topic_id
-    else:
-        if msg.message_id:
-            send_kwargs["reply_to_message_id"] = msg.message_id
+        send_kwargs["message_thread_id"] = dm_topic_id
 
     try:
         await context.bot.send_message(
@@ -329,6 +331,10 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # MAIN
 # =========================
 def main() -> None:
+    if not BOT_TOKEN:
+        logger.error("BOT_TOKEN no configurado. Saliendo.")
+        return
+
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start_command))
@@ -336,8 +342,12 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(error_handler)
 
-    webhook_url = f"{PUBLIC_URL}/telegram/webhook"
-    logger.info(f"Bot iniciado en {webhook_url}")
+    # Limpiar URL pública (eliminar barra final si existe)
+    base_url = PUBLIC_URL.rstrip('/') if PUBLIC_URL else ""
+    webhook_url = f"{base_url}/telegram/webhook"
+    
+    logger.info(f"Iniciando webhook en puerto {PORT}")
+    logger.info(f"Webhook URL configurada: {webhook_url}")
 
     app.run_webhook(
         listen="0.0.0.0",
