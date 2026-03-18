@@ -246,14 +246,9 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # MAIN HANDLER
 # =========================
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info(f"UPDATE RECIBIDO ENTERO: {update}")
+
     msg = update.effective_message
-
-    # 🔥 LOG PARA VER SI ENTRAN MENSAJES
-    logger.info(
-        f"UPDATE RECIBIDO: chat_id={update.effective_chat.id if update.effective_chat else 'None'} "
-        f"text={msg.text if msg and msg.text else 'NO_TEXT'}"
-    )
-
     if not msg or not msg.text:
         return
 
@@ -261,97 +256,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not user_text:
         return
 
-    user_id = str(update.effective_user.id) if update.effective_user else "unknown"
-
-    # rate limit básico
-    if not check_rate_limit(user_id):
-        return
-
-    conv_id, dm_topic_id = conv_id_and_topic(update)
-
-    logger.info(
-        f"Procesando mensaje - conv_id={conv_id} dm_topic_id={dm_topic_id} "
-        f"message_id={msg.message_id}"
-    )
-
-    # guardar input usuario
-    append_history(conv_id, "user", user_text)
-
-    # generar respuesta IA
-    history = get_history(conv_id)
-    raw_reply = generate_reply(history, user_text)
-
-    # fallback si IA falla o dice cosas raras
-    if not validate_reply(raw_reply):
-        logger.warning("Respuesta inválida → fallback")
-        raw_reply = fallback_from_user_text(user_text)
-
-    # humanizar un poco
-    reply = add_human_style(raw_reply)
-
-    # dividir en 2 si es largo
-    part1, part2 = split_message(reply)
-
-    append_history(conv_id, "assistant", part1)
-    if part2:
-        append_history(conv_id, "assistant", part2)
-
-    # typing (puede fallar en topics de canal → ignoramos)
     try:
-        await context.bot.send_chat_action(
-            chat_id=update.effective_chat.id,
-            action="typing",
-        )
-    except Exception:
-        pass
-
-    await asyncio.sleep(typing_delay(part1))
-
-    send_kwargs = {}
-
-    # 🔥 CLAVE: soporte correcto para DM topics
-    if dm_topic_id is not None:
-        send_kwargs["direct_messages_topic_id"] = dm_topic_id
-    else:
-        if msg.message_id:
-            send_kwargs["reply_to_message_id"] = msg.message_id
-
-    try:
-        # enviar primera parte
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text=part1,
-            **send_kwargs,
+            text="te leo",
         )
-
-        # segunda parte si existe
-        if part2:
-            await asyncio.sleep(random.uniform(1.5, 3.5))
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=part2,
-                **send_kwargs,
-            )
-
-    except BadRequest as e:
-        logger.error(f"BadRequest enviando mensaje: {e}")
-        await alert_owner(context, f"⚠️ Error Telegram: {str(e)[:250]}")
-
     except Exception as e:
-        logger.error(f"Error enviando mensaje: {e}")
-        await alert_owner(context, f"⚠️ Error general: {str(e)[:250]}")
-
-
-async def error_handler(update: Optional[Update], context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.error(f"Error global: {context.error}", exc_info=True)
-    if OWNER_CHAT_ID and context.error:
-        try:
-            await context.bot.send_message(
-                chat_id=int(OWNER_CHAT_ID),
-                text=f"💥 Error global: {str(context.error)[:400]}",
-            )
-        except Exception:
-            pass
+        logger.error(f"ERROR ENVIANDO MENSAJE SIMPLE: {e}")
 
 
 def main() -> None:
@@ -359,7 +270,7 @@ def main() -> None:
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("clear", clear_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    app.add_handler(MessageHandler(filters.ALL, on_text))
     app.add_error_handler(error_handler)
 
     webhook_url = f"{PUBLIC_URL}/telegram/webhook"
