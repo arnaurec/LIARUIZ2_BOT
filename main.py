@@ -103,7 +103,11 @@ async def send_reply_with_fanvue(update: Update, context: ContextTypes.DEFAULT_T
     user_id = str(update.effective_user.id)
     data = get_user_context(user_id)
     
-    # Decidir si enviamos el link (cada 5 mensajes o si se fuerza por intención)
+    # REGLA: Si la respuesta de Lia contiene "fanvue", forzamos el link siempre
+    if "fanvue" in reply_text.lower():
+        force_link = True
+    
+    # Decidir si enviamos el link (cada 5 mensajes o si se fuerza por intención o mención de fanvue)
     should_send_link = force_link or (data["msg_count"] > 0 and data["msg_count"] % 5 == 0)
     
     if should_send_link:
@@ -117,6 +121,7 @@ async def send_reply_with_fanvue(update: Update, context: ContextTypes.DEFAULT_T
             f"\nrecuerda q x menos de lo q cuesta un cubata me tienes entera en mi fanvue bb... alli si q te voy a enseñar de todo 🔥"
         ]
         
+        # Si la respuesta de Lia ya menciona fanvue de forma natural, añadimos el link debajo
         full_text = f"{reply_text}\n{random.choice(sales_pitches)}"
         await update.message.reply_text(full_text, reply_markup=reply_markup)
     else:
@@ -148,7 +153,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_text = update.message.text
         data["msg_count"] += 1
         
-        # --- DETECCIÓN DE INTENCIÓN DE VENTA (FANVUE / FOTOS / DINERO) ---
+        # --- DETECCIÓN DE INTENCIÓN DE VENTA ---
         sales_keywords = [
             "link", "enlace", "url", "web", "pagina", "donde", "perfil", "suscribirme", 
             "sitio", "cuenta", "fanvue", "foto", "video", "ver mas", "explicito", 
@@ -175,11 +180,18 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             data["history"].append({"role": "user", "content": user_text})
             data["history"].append({"role": "assistant", "content": reply})
             
-            # Simular escritura
-            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-            await asyncio.sleep(random.uniform(1, 2.5))
+            # --- DELAY HUMANO ALEATORIO (5 a 20 segundos) ---
+            delay = random.uniform(5, 20)
+            logger.info(f"Simulando escritura para {user_id} durante {delay:.2f} segundos...")
             
-            # Forzamos link si hay intención de venta o es el momento del contador
+            # Mostrar "escribiendo..." mientras dura el delay
+            # Lo enviamos cada 5 segundos para que se mantenga activo en Telegram
+            start_typing = time.time()
+            while time.time() - start_typing < delay:
+                await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+                await asyncio.sleep(min(5, delay - (time.time() - start_typing)))
+            
+            # Enviar respuesta con lógica de link integrada
             await send_reply_with_fanvue(update, context, reply, force_link=is_sales_intent)
             
     except Exception as e:
@@ -201,7 +213,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     application.add_error_handler(error_handler)
-    logger.info("Lia 2.0 (Sales Intent Priority) online...")
+    logger.info("Lia 2.0 (Humanized & Link Pro) online...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
