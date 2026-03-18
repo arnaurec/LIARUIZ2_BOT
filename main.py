@@ -34,11 +34,11 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 PORT = int(os.getenv("PORT", "8080"))
 FANVUE_URL = os.getenv("FANVUE_URL", "https://www.fanvue.com/liaruiz")
 
-# HORA DE ARRANQUE DEL BOT (Para ignorar mensajes antiguos)
+# HORA DE ARRANQUE DEL BOT
 START_TIME = time.time()
 
 if not BOT_TOKEN or not OPENAI_API_KEY:
-    logger.error("Faltan variables de entorno críticas (BOT_TOKEN o OPENAI_API_KEY).")
+    logger.error("Faltan variables de entorno críticas.")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -53,10 +53,9 @@ def health_check():
 
 def run_flask():
     try:
-        logger.info(f"Iniciando servidor de salud en puerto {PORT}")
         app_flask.run(host="0.0.0.0", port=PORT)
     except Exception as e:
-        logger.error(f"Error en el servidor Flask: {e}")
+        logger.error(f"Error Flask: {e}")
 
 # =========================
 # MEMORIA Y PERSONALIDAD LIA 2.0
@@ -68,11 +67,10 @@ Eres extremadamente guarra, putona, traviesa, juguetona, sensual y muy sexy.
 
 REGLAS DE ESTILO (GEN Z):
 - Escribe como un chat de móvil real: TODO EN MINÚSCULAS.
-- Usa abreviaturas: 'q' en vez de 'que', 'pq' en vez de 'porque', 'tmb' en vez de 'también', 'bb' en vez de 'bebé', 'tb' en vez de 'también'.
-- Dobla letras para enfatizar: 'holiii', 'buenooo', 'pueees', 'yaaa', 'diooos'.
+- Usa abreviaturas: 'q', 'pq', 'tmb', 'tb', 'bb'.
+- Dobla letras para enfatizar: 'holiii', 'diooos', 'pueees'.
 - NO USES MUCHOS EMOJIS. Solo uno de vez en cuando (😏, 🔥, 😉, 💦).
-- NO SIEMPRE TERMINES CON PREGUNTA. A veces solo afirma algo o sé cortante/seca si quieres jugar.
-- Escribe con alguna falta de ortografía ocasional o falta de tildes para que parezca humano.
+- NO SIEMPRE TERMINES CON PREGUNTA. 
 - Lenguaje MUY EXPLÍCITO: 'polla', 'coño', 'tragar', 'lefa', 'correrte', 'follar', etc.
 
 ESTRATEGIA DE VENTA (FANVUE):
@@ -80,7 +78,6 @@ ESTRATEGIA DE VENTA (FANVUE):
 - Compara el precio con cosas baratas: "bb x 4,99 al mes tienes de todo y mas en mi fanvue... es menos de lo q cuesta un cubata x ahi".
 - Deja claro que en Fanvue NO HAY CENSURA y es donde eres "una guarra de verdad".
 - Menciona que allí hay "contenido explícito a saco" y que podéis chatear sin límites.
-- Suelta estas perlas de forma natural cuando la conversación se caliente.
 """
 
 START_MESSAGES = [
@@ -97,21 +94,33 @@ def get_user_context(user_id: str):
     if user_id not in user_data:
         user_data[user_id] = {
             "history": deque(maxlen=15),
-            "msg_count": 0,
-            "redirected": False
+            "msg_count": 0
         }
     return user_data[user_id]
 
-async def send_fanvue_link(update: Update, context: ContextTypes.DEFAULT_TYPE, text_prefix: str):
-    try:
+async def send_reply_with_fanvue(update: Update, context: ContextTypes.DEFAULT_TYPE, reply_text: str, force_link: bool = False):
+    """Envía la respuesta de Lia y, si toca, añade el link de Fanvue."""
+    user_id = str(update.effective_user.id)
+    data = get_user_context(user_id)
+    
+    # Decidir si enviamos el link (cada 5 mensajes o si se fuerza por intención)
+    should_send_link = force_link or (data["msg_count"] > 0 and data["msg_count"] % 5 == 0)
+    
+    if should_send_link:
         keyboard = [[InlineKeyboardButton("🔥 VENTE A MI SITIO PRIVADO 🔥", url=FANVUE_URL)]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
-            f"{text_prefix}\n\nbb x 4,99 al mes tienes de todo y mas en mi fanvue... es menos de lo q cuesta un cubata x ahi y alli si q soy una guarra de verdad sin censura 😏",
-            reply_markup=reply_markup
-        )
-    except Exception as e:
-        logger.error(f"Error enviando link de Fanvue: {e}")
+        
+        # Frase de venta aleatoria para integrar con el texto de la IA
+        sales_pitches = [
+            f"\nbb x 4,99 al mes tienes de todo y mas en mi fanvue... es menos de lo q cuesta un cubata x ahi y alli si q soy una guarra de verdad sin censura 😏",
+            f"\noye q sepas q en mi fanvue tengo contenido mucho mas explicito y sin censura... alli si q podemos ser todo lo guarros q quieras bb",
+            f"\nrecuerda q x menos de lo q cuesta un cubata me tienes entera en mi fanvue bb... alli si q te voy a enseñar de todo 🔥"
+        ]
+        
+        full_text = f"{reply_text}\n{random.choice(sales_pitches)}"
+        await update.message.reply_text(full_text, reply_markup=reply_markup)
+    else:
+        await update.message.reply_text(reply_text)
 
 # =========================
 # COMANDOS Y MENSAJES
@@ -122,10 +131,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             return
         if update.message:
             user_id = str(update.effective_user.id)
-            user_data[user_id] = {"history": deque(maxlen=15), "msg_count": 0, "redirected": False}
+            user_data[user_id] = {"history": deque(maxlen=15), "msg_count": 0}
             await update.message.reply_text(random.choice(START_MESSAGES))
     except Exception as e:
-        logger.error(f"Error en comando start: {e}")
+        logger.error(f"Error start: {e}")
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
@@ -137,26 +146,17 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = str(update.effective_user.id)
         data = get_user_context(user_id)
         user_text = update.message.text
-        
         data["msg_count"] += 1
         
-        # Estrategia de venta dinámica
-        # A los 7 mensajes soltamos la primera perla de Fanvue
-        if data["msg_count"] == 7:
-            await send_fanvue_link(update, context, "diooos me estas poniendo fatal... oye q sepas q en mi fanvue tengo contenido mucho mas explicito y sin censura")
-            return
-            
-        # A los 12 mensajes forzamos el embudo
-        if data["msg_count"] == 12 and not data["redirected"]:
-            data["redirected"] = True
-            await send_fanvue_link(update, context, "uff bb es q x aqui me corto mazo... vente a mi privado q alli podemos ser todo lo guarros q quieras")
-            return
-
-        # Recordatorio cada 6 mensajes después de la redirección
-        if data["msg_count"] > 12 and data["msg_count"] % 6 == 0:
-            await send_fanvue_link(update, context, "recuerda q x menos de lo q cuesta un cubata me tienes entera en mi fanvue bb... alli si q te voy a enseñar de todo")
-            return
-
+        # --- DETECCIÓN DE INTENCIÓN DE VENTA (FANVUE / FOTOS / DINERO) ---
+        sales_keywords = [
+            "link", "enlace", "url", "web", "pagina", "donde", "perfil", "suscribirme", 
+            "sitio", "cuenta", "fanvue", "foto", "video", "ver mas", "explicito", 
+            "pagar", "cuanto", "precio", "dinero", "cuesta", "suscripcion", "privado"
+        ]
+        user_text_lower = user_text.lower()
+        is_sales_intent = any(word in user_text_lower for word in sales_keywords)
+        
         # Generación de respuesta con OpenAI
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         messages.extend(list(data["history"]))
@@ -171,19 +171,19 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
         reply = resp.choices[0].message.content
         if reply:
-            reply = reply.strip().lower() # Forzamos minúsculas para estilo Gen Z
+            reply = reply.strip().lower()
             data["history"].append({"role": "user", "content": user_text})
             data["history"].append({"role": "assistant", "content": reply})
             
             # Simular escritura
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-            # Pausa humana aleatoria
-            await asyncio.sleep(random.uniform(1, 3))
+            await asyncio.sleep(random.uniform(1, 2.5))
             
-            await update.message.reply_text(reply)
+            # Forzamos link si hay intención de venta o es el momento del contador
+            await send_reply_with_fanvue(update, context, reply, force_link=is_sales_intent)
             
     except Exception as e:
-        logger.error(f"Error OpenAI o procesamiento: {e}")
+        logger.error(f"Error OpenAI: {e}")
         if update.message:
             await update.message.reply_text("ay perdon bb me he quedado un poco pillada pensando en ti... q me decias")
 
@@ -201,7 +201,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     application.add_error_handler(error_handler)
-    logger.info("Lia 2.0 lista para monetizar en modo POLLING...")
+    logger.info("Lia 2.0 (Sales Intent Priority) online...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
