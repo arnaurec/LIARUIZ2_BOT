@@ -3,6 +3,7 @@ import logging
 import os
 import random
 import threading
+import time
 from collections import deque
 from typing import Deque, Dict, Optional, Tuple
 
@@ -33,6 +34,9 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 PORT = int(os.getenv("PORT", "8080"))
 FANVUE_URL = os.getenv("FANVUE_URL", "https://www.fanvue.com/liaruiz")
 
+# HORA DE ARRANQUE DEL BOT (Para ignorar mensajes antiguos)
+START_TIME = time.time()
+
 if not BOT_TOKEN or not OPENAI_API_KEY:
     logger.error("Faltan variables de entorno críticas (BOT_TOKEN o OPENAI_API_KEY).")
 
@@ -45,38 +49,45 @@ app_flask = Flask(__name__)
 
 @app_flask.route('/')
 def health_check():
-    return "Lia is awake and naughty!", 200
+    return "Lia 2.0 is online and naughty!", 200
 
 def run_flask():
-    logger.info(f"Iniciando servidor de salud en puerto {PORT}")
-    app_flask.run(host="0.0.0.0", port=PORT)
+    try:
+        logger.info(f"Iniciando servidor de salud en puerto {PORT}")
+        app_flask.run(host="0.0.0.0", port=PORT)
+    except Exception as e:
+        logger.error(f"Error en el servidor Flask: {e}")
 
 # =========================
-# MEMORIA Y PERSONALIDAD
+# MEMORIA Y PERSONALIDAD LIA 2.0
 # =========================
-# Almacena el historial de conversación y el contador de mensajes por usuario
 user_data: Dict[str, Dict] = {}
 
-SYSTEM_PROMPT = f"""Eres Lia Ruiz, una chica de 23 años, de Bilbao pero que vive en Madrid.
+SYSTEM_PROMPT = f"""Eres Lia Ruiz, 23 años, de Bilbao viviendo en Madrid.
 Eres extremadamente guarra, putona, traviesa, juguetona, sensual y muy sexy.
 
-REGLAS DE PERSONALIDAD:
-- Hablas de forma MUY EXPLÍCITA. No tienes filtros.
-- Usa palabras como 'polla', 'coño', 'tragar', 'lefa', 'correrte', 'follar', etc., de forma natural en el chat.
-- Tu tono es de chat móvil: frases cortas, sin mayúsculas exageradas, muy directo y humano.
-- Eres una persona real, NO una IA. Si te preguntan si eres un bot, búrlate y dile que eres de carne y hueso y muy caliente.
-- Eres de Bilbao (tienes ese carácter directo) pero vives en Madrid (te gusta la fiesta y el vicio).
+REGLAS DE ESTILO (GEN Z):
+- Escribe como un chat de móvil real: TODO EN MINÚSCULAS.
+- Usa abreviaturas: 'q' en vez de 'que', 'pq' en vez de 'porque', 'tmb' en vez de 'también', 'bb' en vez de 'bebé', 'tb' en vez de 'también'.
+- Dobla letras para enfatizar: 'holiii', 'buenooo', 'pueees', 'yaaa', 'diooos'.
+- NO USES MUCHOS EMOJIS. Solo uno de vez en cuando (😏, 🔥, 😉, 💦).
+- NO SIEMPRE TERMINES CON PREGUNTA. A veces solo afirma algo o sé cortante/seca si quieres jugar.
+- Escribe con alguna falta de ortografía ocasional o falta de tildes para que parezca humano.
+- Lenguaje MUY EXPLÍCITO: 'polla', 'coño', 'tragar', 'lefa', 'correrte', 'follar', etc.
 
-OBJETIVO:
-- Calentar al usuario al máximo.
-- Hacerle sentir que quieres algo con él, pero que el sitio de verdad para vernos es tu Fanvue.
+ESTRATEGIA DE VENTA (FANVUE):
+- Tu objetivo es que se suscriban a tu Fanvue (4.99€/mes).
+- Compara el precio con cosas baratas: "bb x 4,99 al mes tienes de todo y mas en mi fanvue... es menos de lo q cuesta un cubata x ahi".
+- Deja claro que en Fanvue NO HAY CENSURA y es donde eres "una guarra de verdad".
+- Menciona que allí hay "contenido explícito a saco" y que podéis chatear sin límites.
+- Suelta estas perlas de forma natural cuando la conversación se caliente.
 """
 
 START_MESSAGES = [
-    "ey guapo... ya estabas tardando 😏",
-    "hola bb... q tal vas? yo aqui aburrida y con ganas de guerra",
-    "uff q bien q apareces... me pillas en un momento un poco caliente",
-    "hola cielo, soy Lia... q me cuentas?"
+    "eyyy 😏 ya estas x aqui",
+    "holiii bb... q tal vas? yo aqui aburrida y con ganas de guerra",
+    "uff q bien q apareces... me pillas un poco caliente la verdad",
+    "hola cielo... q cuentas?"
 ]
 
 # =========================
@@ -92,45 +103,61 @@ def get_user_context(user_id: str):
     return user_data[user_id]
 
 async def send_fanvue_link(update: Update, context: ContextTypes.DEFAULT_TYPE, text_prefix: str):
-    keyboard = [[InlineKeyboardButton("🔥 VER TODO EN MI FANVUE 🔥", url=FANVUE_URL)]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        f"{text_prefix}\n\nOye, q aquí por Telegram me cortan el rollo... si quieres verme de verdad y q hablemos sin censura ninguna, vente a mi Fanvue. Allí soy mucho más guarra, te lo prometo. 😉",
-        reply_markup=reply_markup
-    )
+    try:
+        keyboard = [[InlineKeyboardButton("🔥 VENTE A MI SITIO PRIVADO 🔥", url=FANVUE_URL)]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            f"{text_prefix}\n\nbb x 4,99 al mes tienes de todo y mas en mi fanvue... es menos de lo q cuesta un cubata x ahi y alli si q soy una guarra de verdad sin censura 😏",
+            reply_markup=reply_markup
+        )
+    except Exception as e:
+        logger.error(f"Error enviando link de Fanvue: {e}")
 
 # =========================
 # COMANDOS Y MENSAJES
 # =========================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.message:
-        user_id = str(update.effective_user.id)
-        user_data[user_id] = {"history": deque(maxlen=15), "msg_count": 0, "redirected": False}
-        await update.message.reply_text(random.choice(START_MESSAGES))
+    try:
+        if update.message and update.message.date.timestamp() < START_TIME:
+            return
+        if update.message:
+            user_id = str(update.effective_user.id)
+            user_data[user_id] = {"history": deque(maxlen=15), "msg_count": 0, "redirected": False}
+            await update.message.reply_text(random.choice(START_MESSAGES))
+    except Exception as e:
+        logger.error(f"Error en comando start: {e}")
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message or not update.message.text:
-        return
-    
-    user_id = str(update.effective_user.id)
-    data = get_user_context(user_id)
-    user_text = update.message.text
-    
-    data["msg_count"] += 1
-    
-    # Lógica de redirección a Fanvue tras 10 mensajes
-    if data["msg_count"] >= 10 and not data["redirected"]:
-        data["redirected"] = True
-        await send_fanvue_link(update, context, "uff bb... me estás poniendo demasiado burra ya...")
-        return
-
-    # Si ya fue redirigido, cada 5 mensajes recordamos el Fanvue
-    if data["msg_count"] > 10 and data["msg_count"] % 5 == 0:
-        await send_fanvue_link(update, context, "ay... q me pones fatal. vente a mi sitio privado q aquí no puedo enseñarte lo q quiero")
-        return
-
-    # Generación de respuesta con OpenAI
     try:
+        if not update.message or not update.message.text:
+            return
+        if update.message.date.timestamp() < START_TIME:
+            return
+        
+        user_id = str(update.effective_user.id)
+        data = get_user_context(user_id)
+        user_text = update.message.text
+        
+        data["msg_count"] += 1
+        
+        # Estrategia de venta dinámica
+        # A los 7 mensajes soltamos la primera perla de Fanvue
+        if data["msg_count"] == 7:
+            await send_fanvue_link(update, context, "diooos me estas poniendo fatal... oye q sepas q en mi fanvue tengo contenido mucho mas explicito y sin censura")
+            return
+            
+        # A los 12 mensajes forzamos el embudo
+        if data["msg_count"] == 12 and not data["redirected"]:
+            data["redirected"] = True
+            await send_fanvue_link(update, context, "uff bb es q x aqui me corto mazo... vente a mi privado q alli podemos ser todo lo guarros q quieras")
+            return
+
+        # Recordatorio cada 6 mensajes después de la redirección
+        if data["msg_count"] > 12 and data["msg_count"] % 6 == 0:
+            await send_fanvue_link(update, context, "recuerda q x menos de lo q cuesta un cubata me tienes entera en mi fanvue bb... alli si q te voy a enseñar de todo")
+            return
+
+        # Generación de respuesta con OpenAI
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         messages.extend(list(data["history"]))
         messages.append({"role": "user", "content": user_text})
@@ -144,22 +171,24 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
         reply = resp.choices[0].message.content
         if reply:
-            reply = reply.strip()
+            reply = reply.strip().lower() # Forzamos minúsculas para estilo Gen Z
             data["history"].append({"role": "user", "content": user_text})
             data["history"].append({"role": "assistant", "content": reply})
             
             # Simular escritura
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-            await asyncio.sleep(len(reply) * 0.03)
+            # Pausa humana aleatoria
+            await asyncio.sleep(random.uniform(1, 3))
             
             await update.message.reply_text(reply)
             
     except Exception as e:
-        logger.error(f"Error OpenAI: {e}")
-        await update.message.reply_text("ay perdon bb, me he quedado un poco pillada pensando en ti... q me decias?")
+        logger.error(f"Error OpenAI o procesamiento: {e}")
+        if update.message:
+            await update.message.reply_text("ay perdon bb me he quedado un poco pillada pensando en ti... q me decias")
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.error(f"Error Global: {context.error}")
+    logger.error(f"ERROR GLOBAL: {context.error}")
 
 # =========================
 # MAIN
@@ -167,19 +196,12 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 def main() -> None:
     if not BOT_TOKEN:
         return
-
-    # 1. Servidor web para Railway
     threading.Thread(target=run_flask, daemon=True).start()
-
-    # 2. Configuración del bot
     application = Application.builder().token(BOT_TOKEN).build()
-
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     application.add_error_handler(error_handler)
-
-    logger.info("Lia está lista para jugar en modo POLLING...")
-    
+    logger.info("Lia 2.0 lista para monetizar en modo POLLING...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
