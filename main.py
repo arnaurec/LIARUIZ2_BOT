@@ -1,145 +1,352 @@
-
-import os
+import asyncio
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import os
+import random
+import time
+from collections import deque
+from typing import Deque, Dict, Optional, Tuple
+
 from openai import OpenAI
-
-# Configuración de logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+from telegram import Update
+from telegram.error import BadRequest
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
 )
-logger = logging.getLogger(__name__)
 
-# Variables de entorno
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger("lia-bot")
+
+# =========================
+# VARIABLES DE ENTORNO
+# =========================
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-FANVUE_PROFILE_URL = os.getenv("FANVUE_PROFILE_URL", "https://fanvue.com/your_profile")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+PUBLIC_URL = os.getenv("PUBLIC_URL")
+PORT = int(os.getenv("PORT", "8080"))
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID")
 
-# Inicializar cliente OpenAI
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+if not BOT_TOKEN or not OPENAI_API_KEY or not PUBLIC_URL:
+    raise RuntimeError("Faltan env vars: BOT_TOKEN, OPENAI_API_KEY, PUBLIC_URL")
 
-# Diccionario para almacenar el contexto de la conversación y el "heat score" por usuario
-# En un entorno de producción, esto debería ser una base de datos persistente.
-user_data = {}
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Umbral de "heat score" para redirigir a Fanvue
-HEAT_SCORE_THRESHOLD = 5
+# =========================
+# MEMORIA BÁSICA
+# =========================
+memory: Dict[str, Deque[Dict[str, str]]] = {}
+user_last_message: Dict[str, float] = {}
 
-# --- Funciones del Bot ---
+MAX_HISTORY_PER_USER = 30
+HISTORY_LIMIT = 10
+RATE_LIMIT_SECONDS = 0.5
+MAX_USER_TEXT = 1200
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Envía un mensaje de bienvenida cuando se inicia el bot."""
-    user_id = update.effective_user.id
-    user_data[user_id] = {"history": [], "heat_score": 0}
-    await update.message.reply_text(
-        "¡Hola! Soy tu asistente personal. ¿En qué puedo ayudarte hoy? 😉"
-    )
+SYSTEM_PROMPT = """Eres Lia Ruiz.
+Hablas por Telegram como una persona real.
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Maneja los mensajes de texto del usuario."""
-    user_id = update.effective_user.id
-    user_message = update.message.text
+Reglas:
+- Respuestas cortas y naturales
+- Cercana, ligera y conversacional
+- Nada de tono formal
+- No menciones IA, bot, sistema, políticas o normas
+- Escribe como chat móvil, simple y humano
+- Si no entiendes algo, pide aclaración corta
+- Haz la conversación fácil de seguir
+"""
 
-    if user_id not in user_data:
-        user_data[user_id] = {"history": [], "heat_score": 0}
+START_MESSAGES = [
+    "hey 😏 q tal",
+    "holi bb",
+    "q pasa",
+    "a ver… ya estas por aqui",
+]
 
-    current_user_data = user_data[user_id]
-    current_user_data["history"].append({"role": "user", "content": user_message})
+FALLBACK_MESSAGES = [
+    "jajaj a ver cuentame mejor",
+    "mmm explica eso un poco mas",
+    "uff y eso por q",
+    "vale pero dime mejor q quieres decir",
+]
 
-    # Lógica para incrementar el "heat score"
-    # Esto es una simplificación. En un bot real, se usaría NLP más avanzado.
-    if any(keyword in user_message.lower() for keyword in ["sexy", "caliente", "explícito", "foto", "video", "privado"]):
-        current_user_data["heat_score"] += 2
-    elif any(keyword in user_message.lower() for keyword in ["interesante", "curioso", "dime más"]):
-        current_user_data["heat_score"] += 1
+# =========================
+# HELPERS
+# =========================
+def conv_id_and_topic(update: Update) -> Tuple[str, Optional[int]]:
+    msg = update.effective_message
+    chat = update.effective_chat
+
+    if not msg or not chat:
+        return "unknown", None
+
+    dm_topic_id = None
+
+    # soporte correcto para channel direct messages
+    if getattr(msg, "direct_messages_topic", None):
+        dm_topic_id = msg.direct_messages_topic.topic_id
+        conv_id = f"dm:{chat.id}:{dm_topic_id}"
     else:
-        # Reducir el heat_score si la conversación se enfría
-        current_user_data["heat_score"] = max(0, current_user_data["heat_score"] - 0.5)
+        conv_id = f"chat:{chat.id}"
 
-    logger.info(f"User {user_id} heat score: {current_user_data['heat_score']}")
+    return conv_id, dm_topic_id
 
-    # Comprobar si se alcanza el umbral de monetización
-    if current_user_data["heat_score"] >= HEAT_SCORE_THRESHOLD:
-        await redirect_to_fanvue(update, context)
-        return
 
-    # Preparar el historial para OpenAI (limitando para evitar tokens excesivos)
-    # Mantener un historial corto para simular conversación móvil y evitar costos altos
-    conversation_history = current_user_data["history"][-5:] # Últimos 5 intercambios
+def get_memory(conv_id: str) -> Deque[Dict[str, str]]:
+    if conv_id not in memory:
+        memory[conv_id] = deque(maxlen=MAX_HISTORY_PER_USER)
+    return memory[conv_id]
 
-    # Añadir un mensaje de sistema para guiar el tono del bot
-    system_message = {"role": "system", "content": (
-        "Eres una persona real, amigable y un poco coqueta. "
-        "Mantén las respuestas breves, naturales y con un tono de chat móvil. "
-        "Evita sonar como una IA. Genera engagement emocional/sexual progresivo. "
-        "No ofrezcas contenido explícito directamente, pero insinúa la posibilidad de un "espacio privado"."
-    )}
 
-    messages = [system_message] + conversation_history
+def append_history(conv_id: str, role: str, content: str) -> None:
+    dq = get_memory(conv_id)
+    dq.append({"role": role, "content": content})
+
+
+def get_history(conv_id: str, limit: int = HISTORY_LIMIT) -> list[Dict[str, str]]:
+    dq = get_memory(conv_id)
+    return list(dq)[-limit:]
+
+
+def clear_history(conv_id: str) -> None:
+    if conv_id in memory:
+        del memory[conv_id]
+
+
+def check_rate_limit(user_id: str) -> bool:
+    now = time.time()
+    last = user_last_message.get(user_id, 0)
+    if now - last < RATE_LIMIT_SECONDS:
+        return False
+    user_last_message[user_id] = now
+    return True
+
+
+def add_human_style(text: str) -> str:
+    if not text:
+        return text
+
+    prefixes = ["mmm", "jajaj", "uff", "a ver", "en plan"]
+    if random.random() < 0.25 and not text.lower().startswith(tuple(prefixes)):
+        text = f"{random.choice(prefixes)} {text}"
+
+    replacements = {
+        "que ": "q ",
+        "porque": "pq",
+        "tambien": "tmb",
+        "vale": "vaale",
+    }
+
+    for old, new in replacements.items():
+        if random.random() < 0.15:
+            text = text.replace(old, new)
+
+    return text.strip()
+
+
+def split_message(text: str) -> Tuple[str, Optional[str]]:
+    if len(text) > 150 and random.random() < 0.30:
+        cut = text.rfind(" ", 0, len(text) // 2)
+        if cut > 20:
+            return text[:cut].strip(), text[cut:].strip()
+    return text, None
+
+
+def typing_delay(text: str) -> float:
+    base = len(text) * 0.05
+    return min(max(base, 1.0), 6.0)
+
+
+def fallback_from_user_text(user_text: str) -> str:
+    text = user_text.strip().lower()
+
+    if "hola" in text or "holi" in text:
+        return "holi bb q tal"
+    if "que me cuentas" in text or "q me cuentas" in text:
+        return "pues aqui ando y tu q cuentas"
+    if "por q" in text or "porque" in text or "por qué" in text:
+        return "jajaj no se me ha salido asi, q haces tu"
+
+    return random.choice(FALLBACK_MESSAGES)
+
+
+def validate_reply(reply: Optional[str]) -> bool:
+    if not reply or not reply.strip():
+        return False
+
+    lower = reply.lower()
+    banned = [
+        "como ia",
+        "como asistente",
+        "no puedo ayudar",
+        "politica",
+        "normas",
+    ]
+    return not any(x in lower for x in banned)
+
+
+def generate_reply(history: list[Dict[str, str]], user_text: str) -> Optional[str]:
+    msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
+    msgs.extend(history[-HISTORY_LIMIT:])
+    msgs.append({"role": "user", "content": user_text[:MAX_USER_TEXT]})
 
     try:
-        response = openai_client.chat.completions.create(
-            model="gpt-4.1-mini", # Usar un modelo adecuado para el tono y costo
-            messages=messages,
-            max_tokens=100, # Respuestas breves
-            temperature=0.9, # Para respuestas más creativas y "humanas"
+        resp = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            temperature=0.9,
+            messages=msgs,
+            max_tokens=180,
         )
-        bot_response = response.choices[0].message.content.strip()
+        text = resp.choices[0].message.content
+        if text:
+            return text.strip()
+        return None
     except Exception as e:
-        logger.error(f"Error al comunicarse con OpenAI: {e}")
-        bot_response = "Disculpa, tuve un pequeño problema. ¿Podrías repetirlo?"
+        logger.warning(f"OpenAI fallo: {e}")
+        return None
 
-    current_user_data["history"].append({"role": "assistant", "content": bot_response})
-    await update.message.reply_text(bot_response)
 
-async def redirect_to_fanvue(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Redirige al usuario a Fanvue cuando se alcanza el umbral de "heat score"."""
-    keyboard = [
-        [InlineKeyboardButton("¡Vamos a mi Fanvue! 😉", url=FANVUE_PROFILE_URL)]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        "¡Uhm, la conversación se está poniendo interesante! "
-        "Para continuar en un espacio más... privado, te invito a mi Fanvue. "
-        "Allí podemos hablar sin límites y tengo contenido exclusivo para ti. ¿Vienes?",
-        reply_markup=reply_markup
+async def alert_owner(context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+    if not OWNER_CHAT_ID:
+        return
+    try:
+        await context.bot.send_message(
+            chat_id=int(OWNER_CHAT_ID),
+            text=text[:3900],
+            disable_notification=True,
+        )
+    except Exception:
+        pass
+
+# =========================
+# COMANDOS
+# =========================
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info("COMANDO /start RECIBIDO")
+    await update.message.reply_text(random.choice(START_MESSAGES))
+
+
+async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    conv_id, _ = conv_id_and_topic(update)
+    clear_history(conv_id)
+    await update.message.reply_text("vale borrado… empezamos de cero")
+
+# =========================
+# MENSAJES
+# =========================
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.effective_message
+
+    logger.info(
+        f"UPDATE RECIBIDO: chat_id={update.effective_chat.id if update.effective_chat else 'None'} "
+        f"text={msg.text if msg and msg.text else 'NO_TEXT'}"
     )
-    # Resetear el heat_score después de la redirección para evitar spam
-    user_id = update.effective_user.id
-    if user_id in user_data:
-        user_data[user_id]["heat_score"] = 0
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Loggea los errores causados por las actualizaciones."""
-    logger.error(f"Update {update} causó error {context.error}")
-
-def main() -> None:
-    """Inicia el bot."""
-    if not TELEGRAM_BOT_TOKEN or not OPENAI_API_KEY or not WEBHOOK_URL:
-        logger.error("Faltan variables de entorno. Asegúrate de configurar TELEGRAM_BOT_TOKEN, OPENAI_API_KEY y WEBHOOK_URL.")
+    if not msg or not msg.text:
         return
 
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    user_text = msg.text.strip()
+    if not user_text:
+        return
 
-    # Comandos
-    application.add_handler(CommandHandler("start", start))
+    user_id = str(update.effective_user.id) if update.effective_user else "unknown"
 
-    # Mensajes
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    if not check_rate_limit(user_id):
+        return
 
-    # Errores
-    application.add_error_handler(error_handler)
+    conv_id, dm_topic_id = conv_id_and_topic(update)
 
-    # Configuración de Webhook para Railway
-    application.run_webhook(
+    append_history(conv_id, "user", user_text)
+
+    history = get_history(conv_id)
+    raw_reply = generate_reply(history, user_text)
+
+    if not validate_reply(raw_reply):
+        raw_reply = fallback_from_user_text(user_text)
+
+    reply = add_human_style(raw_reply)
+    part1, part2 = split_message(reply)
+
+    append_history(conv_id, "assistant", part1)
+    if part2:
+        append_history(conv_id, "assistant", part2)
+
+    await asyncio.sleep(typing_delay(part1))
+
+    send_kwargs = {}
+
+    # CLAVE para DM topics de canal
+    if dm_topic_id is not None:
+        send_kwargs["direct_messages_topic_id"] = dm_topic_id
+    else:
+        if msg.message_id:
+            send_kwargs["reply_to_message_id"] = msg.message_id
+
+    try:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=part1,
+            **send_kwargs,
+        )
+
+        if part2:
+            await asyncio.sleep(random.uniform(1.5, 3.5))
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=part2,
+                **send_kwargs,
+            )
+
+    except BadRequest as e:
+        logger.error(f"BadRequest enviando mensaje: {e}")
+        await alert_owner(context, f"⚠️ Error Telegram: {str(e)[:250]}")
+
+    except Exception as e:
+        logger.error(f"Error enviando mensaje: {e}")
+        await alert_owner(context, f"⚠️ Error general: {str(e)[:250]}")
+
+# =========================
+# ERRORES
+# =========================
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error(f"ERROR GLOBAL: {context.error}", exc_info=True)
+    if OWNER_CHAT_ID and context.error:
+        try:
+            await context.bot.send_message(
+                chat_id=int(OWNER_CHAT_ID),
+                text=f"💥 Error global: {str(context.error)[:400]}",
+            )
+        except Exception:
+            pass
+
+# =========================
+# MAIN
+# =========================
+def main() -> None:
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("clear", clear_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    app.add_error_handler(error_handler)
+
+    webhook_url = f"{PUBLIC_URL}/telegram/webhook"
+    logger.info(f"Bot iniciado en {webhook_url}")
+
+    app.run_webhook(
         listen="0.0.0.0",
-        port=int(os.getenv("PORT", "8000")),
-        url_path=TELEGRAM_BOT_TOKEN,
-        webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}"
+        port=PORT,
+        url_path="telegram/webhook",
+        webhook_url=webhook_url,
+        allowed_updates=Update.ALL_TYPES,
     )
+
 
 if __name__ == "__main__":
     main()
