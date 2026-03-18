@@ -83,10 +83,8 @@ FALLBACK_MESSAGES = [
 def conv_id_and_topic(update: Update) -> Tuple[str, Optional[int]]:
     msg = update.effective_message
     chat = update.effective_chat
-
     if not msg or not chat:
         return "unknown", None
-
     dm_topic_id = None
     try:
         if hasattr(msg, "message_thread_id") and msg.message_thread_id:
@@ -96,30 +94,24 @@ def conv_id_and_topic(update: Update) -> Tuple[str, Optional[int]]:
             conv_id = f"chat:{chat.id}"
     except:
         conv_id = f"chat:{chat.id}"
-
     return conv_id, dm_topic_id
-
 
 def get_memory(conv_id: str) -> Deque[Dict[str, str]]:
     if conv_id not in memory:
         memory[conv_id] = deque(maxlen=MAX_HISTORY_PER_USER)
     return memory[conv_id]
 
-
 def append_history(conv_id: str, role: str, content: str) -> None:
     dq = get_memory(conv_id)
     dq.append({"role": role, "content": content})
-
 
 def get_history(conv_id: str, limit: int = HISTORY_LIMIT) -> list[Dict[str, str]]:
     dq = get_memory(conv_id)
     return list(dq)[-limit:]
 
-
 def clear_history(conv_id: str) -> None:
     if conv_id in memory:
         del memory[conv_id]
-
 
 def check_rate_limit(user_id: str) -> bool:
     now = time.time()
@@ -129,28 +121,17 @@ def check_rate_limit(user_id: str) -> bool:
     user_last_message[user_id] = now
     return True
 
-
 def add_human_style(text: str) -> str:
     if not text:
         return text
-
     prefixes = ["mmm", "jajaj", "uff", "a ver", "en plan"]
     if random.random() < 0.25 and not text.lower().startswith(tuple(prefixes)):
         text = f"{random.choice(prefixes)} {text}"
-
-    replacements = {
-        "que ": "q ",
-        "porque": "pq",
-        "tambien": "tmb",
-        "vale": "vaale",
-    }
-
+    replacements = {"que ": "q ", "porque": "pq", "tambien": "tmb", "vale": "vaale"}
     for old, new in replacements.items():
         if random.random() < 0.15:
             text = text.replace(old, new)
-
     return text.strip()
-
 
 def split_message(text: str) -> Tuple[str, Optional[str]]:
     if len(text) > 150 and random.random() < 0.30:
@@ -159,45 +140,31 @@ def split_message(text: str) -> Tuple[str, Optional[str]]:
             return text[:cut].strip(), text[cut:].strip()
     return text, None
 
-
 def typing_delay(text: str) -> float:
     base = len(text) * 0.05
     return min(max(base, 1.0), 6.0)
 
-
 def fallback_from_user_text(user_text: str) -> str:
     text = user_text.strip().lower()
-
     if "hola" in text or "holi" in text:
         return "holi bb q tal"
     if "que me cuentas" in text or "q me cuentas" in text:
         return "pues aqui ando y tu q cuentas"
     if "por q" in text or "porque" in text or "por qué" in text:
         return "jajaj no se me ha salido asi, q haces tu"
-
     return random.choice(FALLBACK_MESSAGES)
-
 
 def validate_reply(reply: Optional[str]) -> bool:
     if not reply or not reply.strip():
         return False
-
     lower = reply.lower()
-    banned = [
-        "como ia",
-        "como asistente",
-        "no puedo ayudar",
-        "politica",
-        "normas",
-    ]
+    banned = ["como ia", "como asistente", "no puedo ayudar", "politica", "normas"]
     return not any(x in lower for x in banned)
-
 
 def generate_reply(history: list[Dict[str, str]], user_text: str) -> Optional[str]:
     msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
     msgs.extend(history[-HISTORY_LIMIT:])
     msgs.append({"role": "user", "content": user_text[:MAX_USER_TEXT]})
-
     try:
         resp = client.chat.completions.create(
             model=OPENAI_MODEL,
@@ -213,132 +180,79 @@ def generate_reply(history: list[Dict[str, str]], user_text: str) -> Optional[st
         logger.warning(f"OpenAI fallo: {e}")
         return None
 
-
-async def alert_owner(context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
-    if not OWNER_CHAT_ID:
-        return
-    try:
-        await context.bot.send_message(
-            chat_id=int(OWNER_CHAT_ID),
-            text=text[:3900],
-            disable_notification=True,
-        )
-    except Exception:
-        pass
-
 # =========================
-# COMANDOS
+# COMANDOS Y MENSAJES
 # =========================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.info("COMANDO /start RECIBIDO")
     await update.message.reply_text(random.choice(START_MESSAGES))
-
 
 async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     conv_id, _ = conv_id_and_topic(update)
     clear_history(conv_id)
     await update.message.reply_text("vale borrado… empezamos de cero")
 
-# =========================
-# MENSAJES
-# =========================
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.effective_message
-
     if not msg or not msg.text:
         return
-
     user_text = msg.text.strip()
-    if not user_text:
-        return
-
     user_id = str(update.effective_user.id) if update.effective_user else "unknown"
-
     if not check_rate_limit(user_id):
         return
-
     conv_id, dm_topic_id = conv_id_and_topic(update)
-
     append_history(conv_id, "user", user_text)
-
     history = get_history(conv_id)
     raw_reply = generate_reply(history, user_text)
-
     if not validate_reply(raw_reply):
         raw_reply = fallback_from_user_text(user_text)
-
     reply = add_human_style(raw_reply)
     part1, part2 = split_message(reply)
-
     append_history(conv_id, "assistant", part1)
     if part2:
         append_history(conv_id, "assistant", part2)
-
     await asyncio.sleep(typing_delay(part1))
-
     send_kwargs = {}
     if dm_topic_id is not None:
         send_kwargs["message_thread_id"] = dm_topic_id
-
     try:
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=part1,
-            **send_kwargs,
-        )
-
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=part1, **send_kwargs)
         if part2:
             await asyncio.sleep(random.uniform(1.5, 3.5))
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=part2,
-                **send_kwargs,
-            )
-
-    except BadRequest as e:
-        logger.error(f"BadRequest enviando mensaje: {e}")
-        await alert_owner(context, f"⚠️ Error Telegram: {str(e)[:250]}")
-
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=part2, **send_kwargs)
     except Exception as e:
         logger.error(f"Error enviando mensaje: {e}")
-        await alert_owner(context, f"⚠️ Error general: {str(e)[:250]}")
 
-# =========================
-# ERRORES
-# =========================
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.error(f"ERROR GLOBAL: {context.error}", exc_info=True)
+    logger.error(f"ERROR GLOBAL: {context.error}")
 
 # =========================
 # MAIN
 # =========================
 def main() -> None:
     if not BOT_TOKEN:
-        logger.error("BOT_TOKEN no configurado. Saliendo.")
         return
+    
+    # IMPORTANTE: Eliminamos el .updater(None) que causaba el RuntimeError
+    # La solución real es forzar Python 3.11 en Railway mediante runtime.txt
+    application = Application.builder().token(BOT_TOKEN).build()
 
-    # Usar updater=None para evitar el error de __polling_cleanup_cb en algunas versiones/entornos
-    app = Application.builder().token(BOT_TOKEN).updater(None).build()
-
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("clear", clear_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-    app.add_error_handler(error_handler)
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("clear", clear_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    application.add_error_handler(error_handler)
 
     base_url = PUBLIC_URL.rstrip('/') if PUBLIC_URL else ""
     webhook_url = f"{base_url}/telegram/webhook"
     
-    logger.info(f"Iniciando webhook en puerto {PORT}")
-    logger.info(f"Webhook URL configurada: {webhook_url}")
+    logger.info(f"Iniciando en puerto {PORT} con URL {webhook_url}")
 
-    app.run_webhook(
+    application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
         url_path="telegram/webhook",
         webhook_url=webhook_url,
         allowed_updates=Update.ALL_TYPES,
     )
-
 
 if __name__ == "__main__":
     main()
