@@ -29,13 +29,10 @@ logger = logging.getLogger("lia-bot")
 # =========================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-PUBLIC_URL = os.getenv("PUBLIC_URL")
-PORT = int(os.getenv("PORT", "8080"))
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID")
 
-if not BOT_TOKEN or not OPENAI_API_KEY or not PUBLIC_URL:
-    logger.error(f"Faltan variables de entorno críticas. BOT_TOKEN: {bool(BOT_TOKEN)}, OPENAI_API_KEY: {bool(OPENAI_API_KEY)}, PUBLIC_URL: {bool(PUBLIC_URL)}")
+if not BOT_TOKEN or not OPENAI_API_KEY:
+    logger.error(f"Faltan variables de entorno críticas. BOT_TOKEN: {bool(BOT_TOKEN)}, OPENAI_API_KEY: {bool(OPENAI_API_KEY)}")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -184,12 +181,14 @@ def generate_reply(history: list[Dict[str, str]], user_text: str) -> Optional[st
 # COMANDOS Y MENSAJES
 # =========================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(random.choice(START_MESSAGES))
+    if update.message:
+        await update.message.reply_text(random.choice(START_MESSAGES))
 
 async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     conv_id, _ = conv_id_and_topic(update)
     clear_history(conv_id)
-    await update.message.reply_text("vale borrado… empezamos de cero")
+    if update.message:
+        await update.message.reply_text("vale borrado… empezamos de cero")
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.effective_message
@@ -230,10 +229,11 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # =========================
 def main() -> None:
     if not BOT_TOKEN:
+        logger.error("No se encontró BOT_TOKEN.")
         return
     
-    # IMPORTANTE: Eliminamos el .updater(None) que causaba el RuntimeError
-    # La solución real es forzar Python 3.11 en Railway mediante runtime.txt
+    # Cambiamos a modo POLLING para máxima estabilidad en Railway
+    # Esto elimina la necesidad de configurar PUBLIC_URL y puertos
     application = Application.builder().token(BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start_command))
@@ -241,18 +241,9 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     application.add_error_handler(error_handler)
 
-    base_url = PUBLIC_URL.rstrip('/') if PUBLIC_URL else ""
-    webhook_url = f"{base_url}/telegram/webhook"
+    logger.info("Iniciando bot en modo POLLING (Máxima estabilidad)...")
     
-    logger.info(f"Iniciando en puerto {PORT} con URL {webhook_url}")
-
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path="telegram/webhook",
-        webhook_url=webhook_url,
-        allowed_updates=Update.ALL_TYPES,
-    )
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
